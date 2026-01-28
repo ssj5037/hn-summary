@@ -222,9 +222,13 @@ def format_main_message(result, top3_stories, rest_stories):
         story = story_map.get(item["id"], {})
         score = story.get("score", 0)
         comments = story.get("descendants", 0)
-        top3_lines.append(f"*{medals[i]} {item['title_kr']}* ({score}점/{comments}댓글)")
+        hn_link = get_hn_link(item["id"])
+        top3_lines.append(
+            f"*{medals[i]} {item['title_kr']}* ({score}점/{comments}댓글)\n"
+            f"   {hn_link}"
+        )
 
-    top3_text = "\n".join(top3_lines)
+    top3_text = "\n\n".join(top3_lines)
 
     # 카테고리 섹션
     category_config = [
@@ -244,7 +248,8 @@ def format_main_message(result, top3_stories, rest_stories):
         for item in items[:3]:
             story = story_map.get(item["id"], {})
             score = story.get("score", 0)
-            lines.append(f"• {item['title_kr']} ({score}점)")
+            hn_link = get_hn_link(item["id"])
+            lines.append(f"• {item['title_kr']} ({score}점) {hn_link}")
 
         category_sections.append(f"*{label}*\n" + "\n".join(lines))
 
