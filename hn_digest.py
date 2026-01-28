@@ -1,9 +1,12 @@
 """
 HN Daily Digest - Hacker News 인기 글을 수집하고 한글로 요약하여 Slack으로 전송
+메인 메시지 + 스레드 답글 구조로 상세 요약과 HN 반응 제공
 """
 
 import os
+import re
 import json
+import time
 import requests
 from datetime import datetime
 from anthropic import Anthropic
@@ -14,6 +17,7 @@ load_dotenv()
 HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
 TOP_STORIES_COUNT = 30
 MIN_SCORE = 50
+COMMENT_FETCH_COUNT = 30
 
 
 def fetch_top_story_ids():
@@ -46,20 +50,44 @@ def fetch_top_stories():
                     "score": item.get("score", 0),
                     "descendants": item.get("descendants", 0),
                     "by": item.get("by", ""),
+                    "kids": item.get("kids", []),
                 })
         except requests.RequestException:
             continue
 
-    # 점수 기준 내림차순 정렬
     stories.sort(key=lambda x: x["score"], reverse=True)
     return stories[:20]
 
 
-def categorize_and_summarize(stories):
-    """Claude API를 사용하여 스토리를 카테고리별로 분류하고 요약한다"""
+def fetch_comments(story):
+    """스토리의 상위 댓글들을 가져온다"""
+    comment_ids = story.get("kids", [])[:COMMENT_FETCH_COUNT]
+    comments = []
+
+    for cid in comment_ids:
+        try:
+            time.sleep(0.1)  # rate limit 고려
+            comment = fetch_item(cid)
+            if comment and comment.get("text") and not comment.get("deleted"):
+                # HTML 태그 제거
+                text = re.sub(r"<[^>]+>", "", comment["text"])
+                text = text.replace("&#x27;", "'").replace("&quot;", '"').replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
+                comments.append(text)
+        except requests.RequestException:
+            continue
+
+    return comments
+
+
+def get_hn_link(item_id):
+    """HN 토론 페이지 링크를 반환한다"""
+    return f"https://news.ycombinator.com/item?id={item_id}"
+
+
+def categorize_stories(stories):
+    """Claude API를 사용하여 스토리를 카테고리별로 분류한다"""
     client = Anthropic()
 
-    # TOP 3와 나머지 분리
     top3 = stories[:3]
     rest = stories[3:]
 
@@ -75,10 +103,10 @@ def categorize_and_summarize(stories):
 
     prompt = f"""다음은 오늘의 Hacker News 인기 글 목록입니다.
 
-## TOP 3 (상세 요약 필요)
+## TOP 3
 {top3_text}
 
-## 나머지 글 (카테고리 분류 필요)
+## 나머지 글
 {rest_text}
 
 다음 JSON 형식으로 응답해주세요:
@@ -87,16 +115,14 @@ def categorize_and_summarize(stories):
   "top3": [
     {{
       "id": 글ID,
-      "title_kr": "한글 제목",
-      "summary": "2문장 이내 요약. 첫 문장은 팩트, 두번째는 의미/임팩트"
+      "title_kr": "한글 제목"
     }}
   ],
   "categories": {{
     "dev": [
       {{
         "id": 글ID,
-        "title_kr": "한글 제목",
-        "one_liner": "10자 내외 한줄 설명"
+        "title_kr": "한글 제목"
       }}
     ],
     "security": [...],
@@ -120,13 +146,10 @@ def categorize_and_summarize(stories):
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=2000,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
+        messages=[{"role": "user", "content": prompt}]
     )
 
     response_text = message.content[0].text.strip()
-    # JSON 파싱
     if response_text.startswith("```"):
         response_text = response_text.split("```")[1]
         if response_text.startswith("json"):
@@ -135,33 +158,73 @@ def categorize_and_summarize(stories):
     return json.loads(response_text), top3, rest
 
 
-def get_hn_link(item_id):
-    """HN 토론 페이지 링크를 반환한다"""
-    return f"https://news.ycombinator.com/item?id={item_id}"
+def analyze_story_with_comments(story, comments):
+    """Claude API를 사용하여 스토리 내용과 댓글을 분석한다"""
+    client = Anthropic()
+
+    comments_text = "\n\n---\n\n".join(comments[:20]) if comments else "댓글 없음"
+
+    prompt = f"""다음은 Hacker News 글과 해당 댓글들입니다.
+
+## 글 정보
+제목: {story['title']}
+URL: {story['url']}
+점수: {story['score']}점
+댓글 수: {story['descendants']}개
+
+## 댓글들
+{comments_text}
+
+다음 JSON 형식으로 응답해주세요:
+
+{{
+  "title_kr": "한글 제목",
+  "summary": "3~5문장으로 글의 핵심 내용 요약. 제목과 댓글 내용을 바탕으로 이 글이 무엇에 대한 것인지 설명",
+  "reactions": {{
+    "positive": ["긍정적 의견 1", "긍정적 의견 2"],
+    "negative": ["부정적/우려 의견 1", "부정적/우려 의견 2"],
+    "interesting": ["흥미로운 의견 1", "흥미로운 의견 2"]
+  }}
+}}
+
+규칙:
+- summary는 한국어로 작성, 기술 용어는 영어 유지 가능
+- reactions의 각 항목은 한국어로 한 문장으로 요약
+- 해당 반응이 없으면 빈 배열로
+- 댓글이 없으면 reactions는 모두 빈 배열로
+- 반드시 유효한 JSON만 출력 (마크다운 코드블록 없이)
+"""
+
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    response_text = message.content[0].text.strip()
+    if response_text.startswith("```"):
+        response_text = response_text.split("```")[1]
+        if response_text.startswith("json"):
+            response_text = response_text[4:]
+
+    return json.loads(response_text)
 
 
-def format_slack_message(result, top3_stories, rest_stories):
-    """Slack 메시지 형식으로 포맷팅한다"""
+def format_main_message(result, top3_stories, rest_stories):
+    """메인 Slack 메시지를 포맷팅한다"""
     today = datetime.now().strftime("%Y년 %m월 %d일")
-
-    # TOP 3 ID -> 원본 스토리 매핑
     story_map = {s["id"]: s for s in top3_stories + rest_stories}
 
     # TOP 3 섹션
-    medals = ["1", "2", "3"]
+    medals = ["1.", "2.", "3."]
     top3_lines = []
     for i, item in enumerate(result["top3"]):
         story = story_map.get(item["id"], {})
         score = story.get("score", 0)
         comments = story.get("descendants", 0)
-        hn_link = get_hn_link(item["id"])
-        top3_lines.append(
-            f"*{medals[i]}. {item['title_kr']}* ({score}점/{comments}댓글)\n"
-            f"{item['summary']}\n"
-            f"<{hn_link}|HN 토론 보기>"
-        )
+        top3_lines.append(f"*{medals[i]} {item['title_kr']}* ({score}점/{comments}댓글)")
 
-    top3_text = "\n\n".join(top3_lines)
+    top3_text = "\n".join(top3_lines)
 
     # 카테고리 섹션
     category_config = [
@@ -181,14 +244,12 @@ def format_slack_message(result, top3_stories, rest_stories):
         for item in items[:3]:
             story = story_map.get(item["id"], {})
             score = story.get("score", 0)
-            hn_link = get_hn_link(item["id"])
-            lines.append(f"• {item['title_kr']} - {item['one_liner']} ({score}점) <{hn_link}|링크>")
+            lines.append(f"• {item['title_kr']} ({score}점)")
 
         category_sections.append(f"*{label}*\n" + "\n".join(lines))
 
     categories_text = "\n\n".join(category_sections)
 
-    # Slack 메시지 구성
     message = {
         "blocks": [
             {
@@ -214,6 +275,18 @@ def format_slack_message(result, top3_stories, rest_stories):
                     "type": "mrkdwn",
                     "text": categories_text
                 }
+            },
+            {
+                "type": "divider"
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "상세 요약 + HN 반응은 스레드에서 확인하세요"
+                    }
+                ]
             }
         ]
     }
@@ -221,20 +294,75 @@ def format_slack_message(result, top3_stories, rest_stories):
     return message
 
 
-def send_to_slack(message):
-    """Slack Webhook으로 메시지를 전송한다"""
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    if not webhook_url:
-        raise ValueError("SLACK_WEBHOOK_URL 환경변수가 설정되지 않았습니다")
+def format_thread_message(rank, story, analysis):
+    """스레드 답글 메시지를 포맷팅한다"""
+    rank_emoji = ["1", "2", "3"][rank]
+    hn_link = get_hn_link(story["id"])
+
+    # 반응 섹션 구성
+    reactions_parts = []
+
+    if analysis["reactions"].get("positive"):
+        positive_lines = "\n".join([f"• {r}" for r in analysis["reactions"]["positive"]])
+        reactions_parts.append(f"*긍정적 반응:*\n{positive_lines}")
+
+    if analysis["reactions"].get("negative"):
+        negative_lines = "\n".join([f"• {r}" for r in analysis["reactions"]["negative"]])
+        reactions_parts.append(f"*부정적/우려:*\n{negative_lines}")
+
+    if analysis["reactions"].get("interesting"):
+        interesting_lines = "\n".join([f"• {r}" for r in analysis["reactions"]["interesting"]])
+        reactions_parts.append(f"*흥미로운 의견:*\n{interesting_lines}")
+
+    reactions_text = "\n\n".join(reactions_parts) if reactions_parts else "아직 주요 댓글이 없습니다."
+
+    text = f"""*{rank_emoji}. {analysis['title_kr']}*
+원문: {story['url']}
+HN 토론: {hn_link}
+
+*내용 요약*
+{analysis['summary']}
+
+*HN 반응*
+{reactions_text}"""
+
+    return {"text": text}
+
+
+def send_slack_message(message, thread_ts=None):
+    """Slack API로 메시지를 전송한다"""
+    bot_token = os.getenv("SLACK_BOT_TOKEN")
+    channel_id = os.getenv("SLACK_CHANNEL_ID")
+
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN 환경변수가 설정되지 않았습니다")
+    if not channel_id:
+        raise ValueError("SLACK_CHANNEL_ID 환경변수가 설정되지 않았습니다")
+
+    payload = {
+        "channel": channel_id,
+        **message
+    }
+
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
 
     response = requests.post(
-        webhook_url,
-        json=message,
-        headers={"Content-Type": "application/json"},
+        "https://slack.com/api/chat.postMessage",
+        headers={
+            "Authorization": f"Bearer {bot_token}",
+            "Content-Type": "application/json"
+        },
+        json=payload,
         timeout=10
     )
     response.raise_for_status()
-    return response
+
+    result = response.json()
+    if not result.get("ok"):
+        raise ValueError(f"Slack API 오류: {result.get('error')}")
+
+    return result
 
 
 def main():
@@ -247,16 +375,33 @@ def main():
         print("수집된 스토리가 없습니다")
         return
 
-    print("Claude API로 카테고리 분류 및 요약 생성 중...")
-    result, top3, rest = categorize_and_summarize(stories)
-    print("요약 생성 완료")
+    print("카테고리 분류 중...")
+    result, top3_stories, rest_stories = categorize_stories(stories)
+    print("분류 완료")
 
-    print("Slack 메시지 포맷팅 중...")
-    message = format_slack_message(result, top3, rest)
+    print("메인 메시지 전송 중...")
+    main_message = format_main_message(result, top3_stories, rest_stories)
+    main_response = send_slack_message(main_message)
+    thread_ts = main_response["ts"]
+    print(f"메인 메시지 전송 완료 (ts: {thread_ts})")
 
-    print("Slack으로 전송 중...")
-    send_to_slack(message)
-    print("전송 완료!")
+    # TOP 3 상세 분석 및 스레드 답글
+    for i, story in enumerate(top3_stories):
+        print(f"TOP {i+1} 댓글 수집 중...")
+        comments = fetch_comments(story)
+        print(f"  {len(comments)}개 댓글 수집")
+
+        print(f"TOP {i+1} 분석 중...")
+        analysis = analyze_story_with_comments(story, comments)
+
+        print(f"TOP {i+1} 스레드 답글 전송 중...")
+        thread_message = format_thread_message(i, story, analysis)
+        send_slack_message(thread_message, thread_ts)
+        print(f"TOP {i+1} 전송 완료")
+
+        time.sleep(1)  # Slack rate limit 고려
+
+    print("모든 작업 완료!")
 
 
 if __name__ == "__main__":
