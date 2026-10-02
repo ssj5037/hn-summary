@@ -143,13 +143,16 @@ def categorize_stories(stories):
 - 반드시 유효한 JSON만 출력 (마크다운 코드블록 없이)
 """
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2000,
+    message = client.beta.messages.create(
+        model="claude-sonnet-5-5",
+        max_tokens=16000,
+        output_config={"effort": "low"},
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
         messages=[{"role": "user", "content": prompt}]
     )
 
-    response_text = message.content[0].text.strip()
+    response_text = get_response_text(message)
     if response_text.startswith("```"):
         response_text = response_text.split("```")[1]
         if response_text.startswith("json"):
@@ -195,19 +198,29 @@ URL: {story['url']}
 - 반드시 유효한 JSON만 출력 (마크다운 코드블록 없이)
 """
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
+    message = client.beta.messages.create(
+        model="claude-sonnet-5-5",
+        max_tokens=16000,
+        output_config={"effort": "low"},
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
         messages=[{"role": "user", "content": prompt}]
     )
 
-    response_text = message.content[0].text.strip()
+    response_text = get_response_text(message)
     if response_text.startswith("```"):
         response_text = response_text.split("```")[1]
         if response_text.startswith("json"):
             response_text = response_text[4:]
 
     return json.loads(response_text)
+
+
+def get_response_text(message):
+    """응답에서 텍스트 블록을 꺼낸다. thinking 블록이 먼저 올 수 있어 content[0] 을 쓰지 않는다"""
+    if message.stop_reason == "refusal":
+        raise RuntimeError(f"Claude 응답 거절: {message.stop_details}")
+    return next(b.text for b in message.content if b.type == "text").strip()
 
 
 def format_main_message(result, top3_stories, rest_stories):
