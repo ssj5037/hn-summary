@@ -364,12 +364,14 @@ def send_slack_message(message, thread_ts=None):
     if thread_ts:
         payload["thread_ts"] = thread_ts
 
+    headers = {"Content-Type": "application/json"}
+    # cloud routine 은 프록시가 credential 을 붙이므로 자리표시자일 때 Authorization 을 보내지 않는다
+    if bot_token != "proxy-injected":
+        headers["Authorization"] = f"Bearer {bot_token}"
+
     response = requests.post(
         "https://slack.com/api/chat.postMessage",
-        headers={
-            "Authorization": f"Bearer {bot_token}",
-            "Content-Type": "application/json"
-        },
+        headers=headers,
         json=payload,
         timeout=10
     )
