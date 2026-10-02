@@ -421,5 +421,46 @@ def main():
     print("모든 작업 완료!")
 
 
+def collect_main(data_path):
+    """routine 용: 스토리와 TOP 3 댓글을 수집해 JSON 파일로 저장한다 (Claude API 미사용)"""
+    stories = fetch_top_stories()
+    print(f"{len(stories)}개 스토리 수집 완료")
+
+    comments = {}
+    for story in stories[:3]:
+        comments[str(story["id"])] = fetch_comments(story)[:20]
+
+    with open(data_path, "w", encoding="utf-8") as f:
+        json.dump({"stories": stories, "comments": comments}, f, ensure_ascii=False, indent=2)
+    print(f"수집 결과 저장: {data_path}")
+
+
+def send_main(data_path, result_path):
+    """routine 용: 수집 데이터와 Claude 가 작성한 분류/분석 결과로 Slack 에 전송한다"""
+    with open(data_path, encoding="utf-8") as f:
+        stories = json.load(f)["stories"]
+    with open(result_path, encoding="utf-8") as f:
+        result = json.load(f)
+
+    top3_stories = stories[:3]
+    rest_stories = stories[3:]
+
+    main_message = format_main_message(result["categorize"], top3_stories, rest_stories)
+    thread_ts = send_slack_message(main_message)["ts"]
+    print(f"메인 메시지 전송 완료 (ts: {thread_ts})")
+
+    for i, story in enumerate(top3_stories):
+        send_slack_message(format_thread_message(i, story, result["analyses"][i]), thread_ts)
+        print(f"TOP {i+1} 전송 완료")
+        time.sleep(1)  # Slack rate limit 고려
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if len(sys.argv) == 3 and sys.argv[1] == "collect":
+        collect_main(sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == "send":
+        send_main(sys.argv[2], sys.argv[3])
+    else:
+        main()
