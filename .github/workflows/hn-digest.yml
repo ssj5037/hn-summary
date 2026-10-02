@@ -28,16 +28,3 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
         run: python hn_digest.py
-
-  # public 레포는 60일간 커밋이 없으면 schedule 워크플로가 자동 비활성화된다.
-  # 매 실행마다 enable API 를 호출해 비활성화 카운터를 리셋한다(더미 커밋 없음).
-  keepalive:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    permissions:
-      actions: write
-    steps:
-      - name: Re-enable workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/hn-digest.yml/enable"
